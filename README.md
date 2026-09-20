@@ -1,16 +1,24 @@
 # dsh-llm-trace
 
-A DeepSeek Harness plugin that captures the **raw HTTP request and response bodies** of model provider calls and serves them on a loopback viewer page.
+A DeepSeek Harness plugin that captures the **raw HTTP request and response bodies** of model provider calls and shows them in a **Conversation View tab** and on a loopback viewer page.
 
 ## Why it exists
 
 `dsh-context` reads the durable session log, so it shows the *provider-neutral* request the loop assembled (system prompt, tool schemas, messages, tool results) and the provider-reported token actuals. It cannot show the **wire** payload: the exact JSON `POST`ed to the provider endpoint and the exact bytes that came back. That gap is what this plugin fills.
 
-The `llm/stream` waterfall is the wrong seam for this. It hands listeners a provider-neutral `GenerateOptions` and a `StreamChunk` iterable; the wire JSON is built *below* it, inside the adapter (`@earendil-works/pi-ai` → the official `openai` SDK → `globalThis.fetch`). The wire layer is therefore only reachable by wrapping `globalThis.fetch`.
+The `llm/stream` waterfall is the wrong seam for the payload. It hands listeners a provider-neutral `GenerateOptions` and a `StreamChunk` iterable; the wire JSON is built *below* it, inside the adapter (`@earendil-works/pi-ai` → the official `openai` SDK → `globalThis.fetch`). The wire layer is therefore only reachable by wrapping `globalThis.fetch`.
 
 ## Use it
 
-The viewer is served by the Web host, so it lives on the same origin as the GUI — no second port:
+### The Conversation View tab
+
+The client half registers one `conversation.view` entry, so a **LLM Trace** tab appears beside Chat in every session. It is **session-scoped**: the host attributes each captured `fetch` to the model call that caused it, so another session's or another subagent's traffic never appears in this tab.
+
+`sessionId` is a plain prop on a `conversation.view` entry, and the component reads the viewer's own JSON endpoints on the same origin — no Remote API and no generated client assembly are involved.
+
+### The HTTP viewer
+
+The same data is served by the Web host, so it needs no second port:
 
 ```
 http://127.0.0.1:3080/llm-trace
@@ -19,10 +27,12 @@ http://127.0.0.1:3080/llm-trace
 | Endpoint | What it returns |
 | --- | --- |
 | `GET /llm-trace` | The viewer document, read from `lib/page.html`. |
-| `GET /llm-trace/api/list` | Newest-first exchange summaries plus retention stats. |
+| `GET /llm-trace/api/list` | Newest-first summaries, retention stats, the client-row diagnostic, and the seen session ids. Accepts `?session=<id>`. |
 | `GET /llm-trace/api/exchange?id=<id>` | One exchange with headers and bodies. |
 
-The page polls the list every 2 s and fetches one exchange's bodies only when the selection or its lifecycle state changes. The detail pane has four tabs and exactly one scroll container.
+This page is **not** session-scoped: it shows every provider call the process made, which is what you want when a subagent or the title generator is the suspect.
+
+Both surfaces pass through the Web host's Host/Origin fence and browser-session cookie check.
 
 ### Why a response body looks enormous
 
@@ -43,15 +53,15 @@ Per chunk that envelope costs roughly 230 bytes — `id` 42, `object` 23, `model
 | `usage` block | ~370 | 0.1% |
 | **per-chunk envelope, repeated 1,030×** | **~272,300** | **98.6%** |
 
-So the response tab defaults to an **assembled** view that concatenates the reasoning and content deltas, reassembles tool-call arguments by stream index, and prints the finish reason and usage. That same stream renders as 3,524 bytes — 1.3% of the raw body. The literal bytes stay behind one toggle.
+So the response pane defaults to an **assembled** view that concatenates the reasoning and content deltas, reassembles tool-call arguments by stream index, and prints the finish reason and usage. That same stream renders as 3,524 bytes — 1.3% of the raw body. The literal bytes stay behind one toggle.
 
 ## Configuration
 
-Every field is optional.
+Every field is optional. The tab and the page share one config; the tab's mount path is the constant `BASE` at the top of `lib/client.js`.
 
 | Field | Default | Meaning |
 | --- | --- | --- |
-| `path` | `/llm-trace` | Mount path; absolute, no trailing slash. |
+| `path` | `/llm-trace` | Mount path; absolute, no trailing slash. Changing it also requires editing `BASE` in `lib/client.js`. |
 | `match` | `['/chat/completions', '/v1/messages', '/v1/responses', '/v1/completions', '/responses']` | URL substrings selecting a provider call, matched case-insensitively. |
 | `matchAll` | `false` | Capture every request regardless of `match`. |
 | `redactHeaders` | `['authorization', 'api-key', 'x-api-key', 'proxy-authorization', 'cookie', 'set-cookie']` | Header names stored as `<redacted>`. Set `[]` to keep them verbatim. |
@@ -65,18 +75,21 @@ Every field is optional.
 - **Only matching URLs take the capture path.** Every other `fetch` call is forwarded untouched, so unrelated traffic is never observed and pays no cost.
 - **The caller is never delayed.** The response body is read from a `Response.clone()`, so the original `Response` is returned as soon as the original fetch resolves. `ReadableStream.tee` keeps both branches independent, which is what lets a streaming SSE body keep streaming.
 - **Bodies are bounded, not selected.** Capture keeps a prefix and marks the exchange truncated at the configured limit, then cancels its own branch so the `tee` buffer cannot grow without bound.
-- **Bodies are decoded as UTF-8 text.** LLM payloads are JSON and SSE. A binary response is recorded with its byte count but is not rendered.
+- **Session attribution rides `AsyncLocalStorage`.** `llm/stream` carries `options.sessionId`, and the adapter's network request happens while the returned stream is pulled. The listener runs every pull inside `sessionScope.run(sessionId, …)`, which makes the id readable from the `fetch` wrapper below the adapter. Interleaved subagent calls stay correct because each pull installs its own scope.
 - **Retention is a count- and byte-bounded ring.** Oldest-first eviction keeps memory flat across a long session.
-- **The viewer document is read per request.** Editing `lib/page.html` takes effect on the next browser refresh; see *Develop* for why that matters.
+- **The viewer document and the client bundle are read per request / per scan.** Editing either takes effect without reloading the host module; see *Develop*.
 - **The wrapper is restored synchronously on disposal**, so a live profile reload cannot leave a stale wrapper installed.
+- **The tab carries no build step.** `lib/client.js` is hand-written in the `window.__ModuleLoader__.load` envelope that `dsh-client-modules` serves: it requires only the platform `react` seed and uses `React.createElement` instead of JSX, so no bundler, no tsdown preset, and no module-graph declaration are involved.
 
 ## Known Limitations and Deferred Work
 
-- **Secrets in bodies are not redacted.** Header redaction covers the credential headers; the request body still carries the full system prompt, every tool schema, and any file content the agent read. The route is served by the Web host and inherits its loopback bind, which is the only access control.
+- **Secrets in bodies are not redacted.** Header redaction covers the credential headers; the request body still carries the full system prompt, every tool schema, and any file content the agent read. Both surfaces sit behind the Web host's loopback bind plus its browser-session cookie check, which is the only access control.
+- **The SSE assembler exists twice.** `lib/page.html` and `lib/client.js` each carry a copy, because a static document and a hand-written bundle cannot import from each other without a build step. A change to one must be mirrored in the other.
+- **`path` is not shared with the client.** The tab fetches a constant, so a non-default mount path needs a matching edit in `lib/client.js`.
 - **The wrapper is process-global and order-dependent.** `@deepseek-ai/dsh-experimental-inspector` wraps the same global; running both nests the wrappers and captures every exchange twice.
 - **A `fetch` reference cached before this plugin activates is not observed.** `dsh-llm-pi-ai` constructs its provider client per request, so it is covered; another adapter that caches the reference at load would not be.
+- **Calls made outside a loop carry no session id.** A hand-built `llm.stream()` call without `sessionId` is captured but appears only in the HTTP viewer.
 - **Binary bodies are byte-counted only.**
-- **No client half.** The viewer is a plain HTTP page, not a GUI tab, so it carries no slots, stores, or locale-owned copy.
 - **The assembled view decodes OpenAI-style SSE only.** A provider using a different streaming envelope falls back to the raw view, which is always available.
 
 ## Install
@@ -86,28 +99,34 @@ The plugin is loaded as a profile patch row pointing at a revision directory, no
 ```yaml
 - insert:
     - id: llm-trace
-      name: '/data/workspace/dsh-plugins/live/r1/lib/index.js'
+      name: '/data/workspace/dsh-plugins/live/r6/lib/index.js'
 ```
 
-Removing that entry disposes the plugin and its route. A `dsh plugin --profile web add/update` run does not manage this row.
+The client row is discovered from that same absolute path: `dsh-client-modules` walks up from the resolved module to the nearest `package.json`, so the package's own `dsh.client` declaration and `./client` export are found without a `node_modules` install. `/llm-trace/api/list` reports the result under `client`.
+
+Removing the entry disposes the plugin, its route, and its tab. A `dsh plugin --profile web add/update` run does not manage this row.
 
 ## Develop
 
 ```sh
 ./sync.sh          # publish a revision and repoint the profile patch
 node test/smoke.mjs
+node test/client.mjs
 ```
 
 Node's ESM module cache is keyed by **resolved realpath**, and the Cordis profile reload does not invalidate it. Once a plugin file has been imported, editing it in place keeps serving the old module until the host process restarts — re-creating the fiber is not enough, and a symlink alias does not help because Node resolves symlinks before caching.
 
-`sync.sh` therefore copies the working tree to `../live/r<N>/` and repoints the patch row, giving the Loader a URL it has never imported. It symlinks `lib/page.html` instead of copying it, so:
+`sync.sh` therefore copies the working tree to `../live/r<N>/` and repoints the patch row, giving the Loader a URL it has never imported. It symlinks `lib/page.html` and `lib/client.js` instead of copying them, because the host reads both from disk:
 
 | Change | What it takes |
 | --- | --- |
 | Viewer markup, CSS, or inline script (`lib/page.html`) | Edit and refresh the browser. No reload. |
+| Browser half (`lib/client.js`) | Edit and refresh the browser. No reload. |
 | Host logic (`lib/index.js`, config, routes) | `./sync.sh`, then reload the page. |
 | Anything after a `dsh web` restart | Nothing; the entry path stays valid. |
 
 ## Test
 
-The smoke test runs a real local HTTP server that streams SSE, and asserts that the consumer still receives every chunk incrementally, that request and response bodies are captured verbatim, that credential headers are redacted, that non-matching URLs are ignored, that the detail pane owns a single scroller, that the SSE assembler drops the per-chunk envelope, and that disposal restores the prior `fetch`.
+`test/smoke.mjs` runs a real local HTTP server that streams SSE, and asserts that the consumer still receives every chunk incrementally, that request and response bodies are captured verbatim, that credential headers are redacted, that non-matching URLs are ignored, that the detail pane owns a single scroller, that the SSE assembler drops the per-chunk envelope, that session attribution survives interleaved pulls, that the authentication guard rejects an unauthenticated caller, and that disposal restores the prior `fetch`.
+
+`test/client.mjs` evaluates the hand-written browser bundle against a stub module loader and a stub React seed, and asserts its envelope, its exports, its locale namespace, and the `conversation.view` registration it performs.

@@ -1,0 +1,78 @@
+/**
+ * Unit test for the hand-written browser bundle.
+ *
+ * No bundler produces `lib/client.js`, so nothing else validates its
+ * `window.__ModuleLoader__.load` envelope, its exports, or the Cordis wiring its
+ * `apply` performs. This evaluates the bundle against a stub loader and a stub
+ * React seed; the component itself is only defined, never rendered.
+ */
+
+import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
+import { fileURLToPath } from 'node:url'
+
+const source = readFileSync(fileURLToPath(new URL('../lib/client.js', import.meta.url)), 'utf8')
+
+let registration
+globalThis.window = { __ModuleLoader__: { load(value) { registration = value } } }
+new Function(source)()
+
+assert.ok(registration, 'the bundle registers itself through window.__ModuleLoader__.load')
+assert.equal(registration.id, 'dsh-llm-trace', 'the envelope id is the package name the boot graph keys on')
+assert.equal(typeof registration.factory, 'function', 'the envelope carries a factory')
+
+const react = {
+  createElement: () => ({}),
+  cloneElement: (element) => element,
+  useState: () => [undefined, () => {}],
+  useEffect: () => {},
+}
+
+const specifiers = []
+const clientExports = registration.factory((specifier) => {
+  specifiers.push(specifier)
+  assert.equal(specifier, 'react', 'the bundle requires only the platform react seed')
+  return react
+})
+
+assert.equal(clientExports.name, 'dsh-llm-trace')
+assert.deepEqual(clientExports.inject, ['slots', 'locale'], 'the plugin waits on the slot and locale services')
+assert.equal(typeof clientExports.apply, 'function')
+
+const seen = []
+const ctx = {
+  effect(factory) { seen.push(['effect', factory()]) },
+  locale: {
+    register(namespace, dictionary) { seen.push(['locale', namespace, dictionary]); return () => {} },
+    bind(namespace) { return (key) => `${namespace}:${key}` },
+  },
+  slots: {
+    inject(key, callback) { seen.push(['inject', key]); callback() },
+    register(options, component) { seen.push(['slot', options, component]); return () => {} },
+  },
+}
+
+clientExports.apply(ctx)
+
+const locale = seen.find((entry) => entry[0] === 'locale')
+assert.ok(locale, 'the bundle registers its locale namespace')
+assert.equal(locale[1], 'dsh-llm-trace')
+assert.deepEqual(Object.keys(locale[2]).sort(), ['en', 'zh'], 'both dictionaries are supplied')
+assert.equal(locale[2].en.tab, 'LLM Trace')
+assert.ok(locale[2].zh.tab, 'the Chinese dictionary covers the tab label')
+
+const inject = seen.find((entry) => entry[0] === 'inject')
+assert.equal(inject[1], 'conversation.view', 'the tab targets the Conversation View slot')
+
+const slot = seen.find((entry) => entry[0] === 'slot')
+assert.equal(slot[1].name, 'conversation.view')
+assert.equal(slot[1].id, 'llm-trace', 'the tab id is stable and namespaced')
+assert.equal(slot[1].locale, 'dsh-llm-trace', 'the tab label resolves through the registered namespace')
+assert.equal(slot[1].label(), 'dsh-llm-trace:tab')
+assert.equal(typeof slot[2], 'function', 'the tab renders a component')
+
+// The bundle carries its own SSE assembler; the page carries a parallel copy,
+// because neither face can import from the other without a build step.
+assert.ok(source.includes('function assembleSse'), 'the bundle carries the SSE assembler')
+
+console.log('client: all assertions passed')

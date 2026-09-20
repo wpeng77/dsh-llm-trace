@@ -32,14 +32,20 @@ function startProvider() {
   })
 }
 
-/** A Cordis context double that records the registered route and disposers. */
+/** A Cordis context double that records the registered route, listeners, and disposers. */
 function fakeContext() {
   const disposers = []
   const routes = []
+  const listeners = {}
+  const services = {}
   return {
     disposers,
     routes,
+    listeners,
+    services,
     effect(factory) { disposers.push(factory()) },
+    on(event, handler) { (listeners[event] ??= []).push(handler) },
+    get(name) { return services[name] },
     webServer: {
       register(route) { routes.push(route); return () => { routes.splice(routes.indexOf(route), 1) } },
     },
@@ -47,14 +53,17 @@ function fakeContext() {
 }
 
 /** Invoke the registered route handler and collect its response. */
-async function callRoute(route, pathname) {
-  const req = { url: pathname }
+async function callRoute(route, pathname, headers = {}) {
+  const req = { url: pathname, headers }
   const chunks = []
   const res = {
     status: 0,
     headers: {},
     writeHead(status, headers) { this.status = status; this.headers = headers },
-    end(body) { chunks.push(body) },
+    end(body) {
+      if (body === undefined || body === null) return
+      chunks.push(Buffer.isBuffer(body) ? body : Buffer.from(String(body), 'utf8'))
+    },
   }
   await route.handler(req, res)
   return { status: res.status, headers: res.headers, body: Buffer.concat(chunks.filter(Boolean)).toString('utf8') }
@@ -187,6 +196,69 @@ assert.equal(after.entries.length, 1, 'a non-matching URL is not captured')
 // --- unknown exchange and unknown route answer 404 --------------------------
 assert.equal((await callRoute(ctx.routes[0], '/llm-trace/api/exchange?id=nope')).status, 404)
 assert.equal((await callRoute(ctx.routes[0], '/llm-trace/nope')).status, 404)
+
+// --- session attribution through llm/stream ---------------------------------
+assert.equal(ctx.listeners['llm/stream']?.length, 1, 'the plugin listens on the llm/stream waterfall')
+
+/** Pull one session-attributed adapter stream, whose fetch runs on the first pull. */
+async function pullAttributed(sessionId, marker) {
+  const listener = ctx.listeners['llm/stream'][0]
+  const stream = listener({ sessionId }, () => (async function* () {
+    const response = await fetch(`http://127.0.0.1:${port}/v1/chat/completions`, {
+      method: 'POST',
+      body: JSON.stringify({ marker }),
+    })
+    await response.text()
+    yield { type: 'finish', reason: { kind: 'stop' } }
+  })())
+  const seen = []
+  for await (const chunk of stream) seen.push(chunk)
+  return seen
+}
+
+// Interleaved pulls must each keep their own scope.
+const [a, b] = await Promise.all([pullAttributed('sess-a', 1), pullAttributed('sess-b', 2)])
+assert.equal(a.length, 1, 'the waterfall wrapper forwards every chunk')
+assert.equal(b.length, 1)
+await new Promise((resolve) => { setTimeout(resolve, 200) })
+
+const listAll = JSON.parse((await callRoute(ctx.routes[0], '/llm-trace/api/list')).body)
+assert.deepEqual(listAll.sessions.sort(), ['sess-a', 'sess-b'], 'both sessions are reported')
+
+const onlyA = JSON.parse((await callRoute(ctx.routes[0], '/llm-trace/api/list?session=sess-a')).body)
+assert.equal(onlyA.entries.length, 1, 'the session filter selects one attributed call')
+assert.equal(onlyA.entries[0].sessionId, 'sess-a', 'the capture carries its own session id')
+
+const detailA = JSON.parse((await callRoute(ctx.routes[0], `/llm-trace/api/exchange?id=${onlyA.entries[0].id}`)).body)
+assert.equal(JSON.parse(detailA.requestBody).marker, 1, 'interleaved calls are not cross-attributed')
+
+const onlyB = JSON.parse((await callRoute(ctx.routes[0], '/llm-trace/api/list?session=sess-b')).body)
+assert.equal(onlyB.entries.length, 1)
+const detailB = JSON.parse((await callRoute(ctx.routes[0], `/llm-trace/api/exchange?id=${onlyB.entries[0].id}`)).body)
+assert.equal(JSON.parse(detailB.requestBody).marker, 2)
+
+assert.equal(
+  JSON.parse((await callRoute(ctx.routes[0], '/llm-trace/api/list?session=nope')).body).entries.length,
+  0,
+  'an unknown session id selects nothing',
+)
+// A call made outside any session scope keeps no attribution.
+assert.equal(listAll.entries.find((e) => e.id === 't1').sessionId, undefined)
+
+// --- the viewer applies the Web host's browser-authentication guard ---------
+// A named webServer route is registered beside that guard, not behind it, so the
+// handler has to apply it or captured prompts leak to any caller reaching the port.
+ctx.services.connection = {
+  requestRejection(request) {
+    return request.headers['x-test-unauthenticated'] === '1' ? 401 : undefined
+  },
+}
+const rejected = await callRoute(ctx.routes[0], '/llm-trace', { 'x-test-unauthenticated': '1' })
+assert.equal(rejected.status, 401, 'an unauthenticated request is rejected')
+assert.ok(!rejected.body.includes('<!doctype html>'), 'the viewer document is not served to a rejected caller')
+assert.equal((await callRoute(ctx.routes[0], '/llm-trace/api/list', { 'x-test-unauthenticated': '1' })).status, 401, 'the JSON endpoints are guarded too')
+assert.equal((await callRoute(ctx.routes[0], '/llm-trace')).status, 200, 'an authenticated request is served')
+delete ctx.services.connection
 
 // --- disposal restores fetch and the route ---------------------------------
 for (const dispose of ctx.disposers) dispose()

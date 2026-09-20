@@ -29,8 +29,12 @@ mkdir -p "$LIVE"
 rm -rf "$dest"
 cp -r "$SRC" "$dest"
 rm -rf "$dest/.git" "$dest/live"
-rm -f "$dest/lib/page.html"
-ln -s "$SRC/lib/page.html" "$dest/lib/page.html"
+# Both browser faces are read from disk by the host, so link them back to the
+# working tree: a viewer or client-bundle edit never needs a revision bump.
+for face in page.html client.js; do
+  rm -f "$dest/lib/$face"
+  ln -s "$SRC/lib/$face" "$dest/lib/$face"
+done
 
 python3 - "$PATCH" "$dest/lib/index.js" <<'PY'
 import re
@@ -39,7 +43,8 @@ import sys
 patch, entry = sys.argv[1], sys.argv[2]
 src = open(patch, encoding='utf8').read()
 new, count = re.subn(
-    r"(?m)^(\s*name:\s*)'[^']*llm-trace[^']*'",
+    # Anchor on the entry id: the published path does not contain the plugin name.
+    r"(?m)(- id: llm-trace\n\s*name:\s*)'[^']*'",
     lambda m: f"{m.group(1)}'{entry}'",
     src,
 )
