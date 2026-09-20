@@ -10,7 +10,7 @@ The `llm/stream` waterfall is the wrong seam for this. It hands listeners a prov
 
 ## Use it
 
-The viewer is served by the Web host, so it lives on the same origin as the GUI:
+The viewer is served by the Web host, so it lives on the same origin as the GUI — no second port:
 
 ```
 http://127.0.0.1:3080/llm-trace
@@ -18,11 +18,32 @@ http://127.0.0.1:3080/llm-trace
 
 | Endpoint | What it returns |
 | --- | --- |
-| `GET /llm-trace` | The self-contained viewer page. |
+| `GET /llm-trace` | The viewer document, read from `lib/page.html`. |
 | `GET /llm-trace/api/list` | Newest-first exchange summaries plus retention stats. |
 | `GET /llm-trace/api/exchange?id=<id>` | One exchange with headers and bodies. |
 
-The page polls every 2 s and can be filtered by URL, status, or method.
+The page polls the list every 2 s and fetches one exchange's bodies only when the selection or its lifecycle state changes. The detail pane has four tabs and exactly one scroll container.
+
+### Why a response body looks enormous
+
+A provider streams **one SSE chunk per token**, and every chunk repeats the entire JSON envelope:
+
+```
+data: {"choices":[{"delta":{"content":"","reasoning_content":"The","role":"assistant"},"index":0},
+       "created":...,"id":"chatcmpl-...","model":"...","object":"chat.completion.chunk","usage":null}
+```
+
+Per chunk that envelope costs roughly 230 bytes — `id` 42, `object` 23, `model` 21, `created` 10, `usage:null` 4, `index`/`role` framing 64 — while carrying a handful of bytes of actual token. On a measured 276,186-byte reasoning-and-tool-call stream the breakdown was:
+
+| Component | Bytes | Share |
+| --- | ---: | ---: |
+| `delta.reasoning_content` | 1,184 | 0.4% |
+| `delta.content` | 118 | 0.0% |
+| tool-call arguments | 2,218 | 0.8% |
+| `usage` block | ~370 | 0.1% |
+| **per-chunk envelope, repeated 1,030×** | **~272,300** | **98.6%** |
+
+So the response tab defaults to an **assembled** view that concatenates the reasoning and content deltas, reassembles tool-call arguments by stream index, and prints the finish reason and usage. That same stream renders as 3,524 bytes — 1.3% of the raw body. The literal bytes stay behind one toggle.
 
 ## Configuration
 
@@ -46,6 +67,7 @@ Every field is optional.
 - **Bodies are bounded, not selected.** Capture keeps a prefix and marks the exchange truncated at the configured limit, then cancels its own branch so the `tee` buffer cannot grow without bound.
 - **Bodies are decoded as UTF-8 text.** LLM payloads are JSON and SSE. A binary response is recorded with its byte count but is not rendered.
 - **Retention is a count- and byte-bounded ring.** Oldest-first eviction keeps memory flat across a long session.
+- **The viewer document is read per request.** Editing `lib/page.html` takes effect on the next browser refresh; see *Develop* for why that matters.
 - **The wrapper is restored synchronously on disposal**, so a live profile reload cannot leave a stale wrapper installed.
 
 ## Known Limitations and Deferred Work
@@ -55,29 +77,37 @@ Every field is optional.
 - **A `fetch` reference cached before this plugin activates is not observed.** `dsh-llm-pi-ai` constructs its provider client per request, so it is covered; another adapter that caches the reference at load would not be.
 - **Binary bodies are byte-counted only.**
 - **No client half.** The viewer is a plain HTTP page, not a GUI tab, so it carries no slots, stores, or locale-owned copy.
+- **The assembled view decodes OpenAI-style SSE only.** A provider using a different streaming envelope falls back to the raw view, which is always available.
 
 ## Install
 
-Installed as a patch entry rather than a bundle, so the live profile reload picks it up without a restart:
-
-```sh
-ln -sfn /data/workspace/dsh-plugins/dsh-llm-trace ~/.dsh/profiles/web/node_modules/dsh-llm-trace
-```
-
-Then add to `~/.dsh/profiles/web/cordis.patch.yml`:
+The plugin is loaded as a profile patch row pointing at a revision directory, not as a declared bundle:
 
 ```yaml
 - insert:
     - id: llm-trace
-      name: 'dsh-llm-trace'
+      name: '/data/workspace/dsh-plugins/live/r1/lib/index.js'
 ```
 
-Removing that entry disposes the plugin and its route; the profile reload is idempotent, so editing a comment around an unchanged entry does not rebuild the plugin fiber. A `dsh plugin --profile web add/update` run may prune the `node_modules` symlink, because the entry is a patch row and not a declared bundle dependency.
+Removing that entry disposes the plugin and its route. A `dsh plugin --profile web add/update` run does not manage this row.
 
-## Test
+## Develop
 
 ```sh
+./sync.sh          # publish a revision and repoint the profile patch
 node test/smoke.mjs
 ```
 
-The smoke test runs a real local HTTP server that streams SSE, and asserts that the consumer still receives every chunk incrementally, that request and response bodies are captured verbatim, that credential headers are redacted, that non-matching URLs are ignored, and that disposal restores the prior `fetch`.
+Node's ESM module cache is keyed by **resolved realpath**, and the Cordis profile reload does not invalidate it. Once a plugin file has been imported, editing it in place keeps serving the old module until the host process restarts — re-creating the fiber is not enough, and a symlink alias does not help because Node resolves symlinks before caching.
+
+`sync.sh` therefore copies the working tree to `../live/r<N>/` and repoints the patch row, giving the Loader a URL it has never imported. It symlinks `lib/page.html` instead of copying it, so:
+
+| Change | What it takes |
+| --- | --- |
+| Viewer markup, CSS, or inline script (`lib/page.html`) | Edit and refresh the browser. No reload. |
+| Host logic (`lib/index.js`, config, routes) | `./sync.sh`, then reload the page. |
+| Anything after a `dsh web` restart | Nothing; the entry path stays valid. |
+
+## Test
+
+The smoke test runs a real local HTTP server that streams SSE, and asserts that the consumer still receives every chunk incrementally, that request and response bodies are captured verbatim, that credential headers are redacted, that non-matching URLs are ignored, that the detail pane owns a single scroller, that the SSE assembler drops the per-chunk envelope, and that disposal restores the prior `fetch`.

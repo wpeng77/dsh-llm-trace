@@ -120,8 +120,63 @@ assert.deepEqual(auth, ['authorization', '<redacted>'], 'the authorization heade
 const page = await callRoute(ctx.routes[0], '/llm-trace')
 assert.equal(page.status, 200)
 assert.ok(page.body.startsWith('<!doctype html>'), 'the viewer page is served at the mount path')
-assert.ok(page.body.includes('var BASE = "/llm-trace"'), 'the page carries the mount path')
-assert.ok(page.body.includes('"/api/list"'), 'the page points at the JSON endpoints')
+assert.ok(page.body.includes('var BASE = location.pathname'), 'the page derives the mount path from its own URL')
+assert.ok(page.body.includes("'/api/list'"), 'the page points at the JSON endpoints')
+
+// --- the page owns exactly one scroll container in the detail pane ----------
+assert.ok(/#pane\{flex:1;min-height:0;overflow:auto/.test(page.body), 'the detail pane owns the single scroller')
+assert.ok(!/pre\{[^}]*overflow:auto/.test(page.body), 'a body panel does not nest its own scroller')
+
+// --- the SSE assembler drops the per-chunk envelope -------------------------
+const script = /<script>([\s\S]*?)<\/script>/.exec(page.body)[1]
+const assembleSse = new Function(`${/function assembleSse\(raw\)\{[\s\S]*?\n\}/.exec(script)[0]}\nreturn assembleSse`)()
+
+/** Build one provider chunk carrying a delta, mirroring the real wire format. */
+function chunk(delta, extra = {}) {
+  return `data: ${JSON.stringify({
+    choices: [{ delta, index: 0, ...extra }],
+    created: 1,
+    id: 'chatcmpl-0123456789abcdef0123456789abcdef',
+    model: 'test-model',
+    object: 'chat.completion.chunk',
+    usage: null,
+  })}\n\n`
+}
+
+const sse = [
+  chunk({ content: '', reasoning_content: '', role: 'assistant' }),
+  chunk({ reasoning_content: 'Let me ' }),
+  chunk({ reasoning_content: 'think.' }),
+  chunk({ content: 'Hello ' }),
+  chunk({ content: 'world' }),
+  chunk({ tool_calls: [{ index: 0, id: 'call_1', function: { name: 'read_file', arguments: '{"pa' } }] }),
+  chunk({ tool_calls: [{ index: 0, function: { arguments: 'th":"a.txt"}' } }] }),
+  chunk({ tool_calls: [{ index: 1, function: { name: 'grep', arguments: '{"q":"x"}' } }] }),
+  chunk({}, { finish_reason: 'tool_calls' }),
+  `data: ${JSON.stringify({ choices: [], usage: { completion_tokens: 9, prompt_tokens: 100, total_tokens: 109 } })}\n\n`,
+  'data: [DONE]\n\n',
+].join('')
+
+const assembled = assembleSse(sse)
+assert.equal(assembled.reasoning, 'Let me think.', 'reasoning deltas concatenate')
+assert.equal(assembled.content, 'Hello world', 'content deltas concatenate')
+assert.equal(assembled.tools.length, 2, 'tool calls group by their stream index')
+assert.equal(assembled.tools[0].name, 'read_file')
+assert.equal(assembled.tools[0].args, '{"path":"a.txt"}', 'tool-call argument fragments reassemble')
+assert.equal(assembled.tools[1].name, 'grep')
+assert.equal(assembled.finish, 'tool_calls')
+assert.equal(assembled.usage.total_tokens, 109)
+assert.equal(assembled.chunks, 10)
+assert.equal(assembled.done, true)
+assert.equal(assembled.broken, 0)
+
+// The envelope dwarfs the payload on the real wire, which is why the pane
+// defaults to the assembled view.
+assert.ok(sse.length > 1500, `the fixture carries real envelope weight, got ${sse.length}`)
+assert.ok(assembled.content.length + assembled.reasoning.length < 30)
+
+const cut = assembleSse(`${sse}data: {"choices":[{"delta":{"content":"tru`)
+assert.equal(cut.broken, 1, 'a body cut at the capture limit reports one incomplete trailing chunk')
 
 // --- a non-matching call is never observed ----------------------------------
 await fetch(`http://127.0.0.1:${port}/unrelated`, { method: 'POST', body: 'nope' })
