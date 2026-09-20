@@ -136,3 +136,13 @@ Node's ESM module cache is keyed by **resolved realpath**, and the Cordis profil
 `test/smoke.mjs` runs a real local HTTP server that streams SSE, and asserts that the consumer still receives every chunk incrementally, that request and response bodies are captured verbatim, that credential headers are redacted, that non-matching URLs are ignored, that the detail pane owns a single scroller, that the SSE assembler drops the per-chunk envelope, that session attribution survives interleaved pulls, that the authentication guard rejects an unauthenticated caller, and that disposal restores the prior `fetch`.
 
 `test/client.mjs` evaluates the hand-written browser bundle against a stub module loader and a stub React seed, and asserts its envelope, its exports, its locale namespace, and the `conversation.view` registration it performs.
+
+`test/e2e.mjs` is the only check that covers the whole path. It needs a running `dsh web` and the launch token that host printed, drives the Playwright-cached chromium over CDP, opens a session, asserts the tab is present, clicks it, opens the largest captured response, and reads the assembled view back — failing on any console error or uncaught exception.
+
+```sh
+TOKEN=$(journalctl -u dsh-web --no-pager \
+  | grep -o 'http://127.0.0.1:3080/?token=[A-Za-z0-9_-]*' | tail -1 | sed 's/.*token=//')
+node test/e2e.mjs "$TOKEN"
+```
+
+The token is what mints the host's browser-session cookie, which every route requires; without it the viewer answers 401 and the check cannot run.
