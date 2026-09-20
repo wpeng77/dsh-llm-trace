@@ -55,3 +55,7 @@ print(f"sync: profile patch now loads {entry}")
 PY
 
 echo "sync: published $dest"
+
+# Older revisions stay reachable only until the next sync, and their modules are
+# already in the host's ESM cache, so the copy on disk is dead weight.
+find "$LIVE" -mindepth 1 -maxdepth 1 -type d -name 'r*' ! -name "r$rev" -exec rm -rf {} +
