@@ -231,6 +231,40 @@ if (layout.shellOverflow > 4) {
   finish(1)
 }
 
+// The composer seat is a sibling of the view area, so the seat rule has to hide
+// it while this view is mounted and let it back when another view takes over.
+async function clickTab(name) {
+  const hit = await evaluate(`(function(){
+    var tabs = Array.from(document.querySelectorAll('[role="tab"]'));
+    var target = tabs.filter(function(n){ return n.textContent.indexOf(${JSON.stringify(name)}) >= 0 })[0];
+    if (!target) return 'MISSING';
+    target.click();
+    return target.textContent.trim();
+  })()`)
+  await sleep(2600)
+  return hit
+}
+
+async function composerDisplay() {
+  return evaluate(`(function(){
+    var seat = document.querySelector('[data-composer-seat]');
+    return seat ? getComputedStyle(seat).display : 'absent';
+  })()`)
+}
+
+const seatTrace = []
+for (const name of ['Chat', 'LLM Trace', 'Chat', 'LLM Trace']) {
+  await clickTab(name)
+  seatTrace.push(await composerDisplay())
+}
+console.log('composer seat        :', JSON.stringify(seatTrace), '(Chat, LLM Trace, Chat, LLM Trace)')
+
+const seatOk = seatTrace[0] !== 'none' && seatTrace[1] === 'none' && seatTrace[2] !== 'none' && seatTrace[3] === 'none'
+if (!seatOk) {
+  console.log('SEAT FAIL: the composer must hide on the trace tab and return on Chat')
+  finish(1)
+}
+
 console.log('console errors  :', consoleErrors.length ? JSON.stringify(consoleErrors.slice(0, 5)) : 'none')
 console.log('exceptions      :', exceptions.length ? JSON.stringify(exceptions.slice(0, 5)) : 'none')
 finish(exceptions.length === 0 ? 0 : 1)

@@ -39,6 +39,22 @@ assert.equal(clientExports.name, 'dsh-llm-trace')
 assert.deepEqual(clientExports.inject, ['slots', 'locale'], 'the plugin waits on the slot and locale services')
 assert.equal(typeof clientExports.apply, 'function')
 
+// The bundle installs a seat stylesheet; nothing else checks that rule, and a
+// silently missing one leaves the composer visible under the trace view.
+const styleTags = []
+globalThis.document = {
+  head: { appendChild(node) { styleTags.push(node) } },
+  createElement(tag) {
+    return {
+      tagName: tag,
+      attributes: {},
+      textContent: '',
+      setAttribute(name, value) { this.attributes[name] = value },
+      remove() { this.removed = true },
+    }
+  },
+}
+
 const seen = []
 const ctx = {
   effect(factory) { seen.push(['effect', factory()]) },
@@ -70,6 +86,13 @@ assert.equal(slot[1].id, 'llm-trace', 'the tab id is stable and namespaced')
 assert.equal(slot[1].locale, 'dsh-llm-trace', 'the tab label resolves through the registered namespace')
 assert.equal(slot[1].label(), 'dsh-llm-trace:tab')
 assert.equal(typeof slot[2], 'function', 'the tab renders a component')
+
+assert.equal(styleTags.length, 1, 'the bundle installs exactly one seat stylesheet')
+const seatCss = styleTags[0].textContent
+assert.ok(seatCss.includes('[data-conversation-scroll]:has([data-llm-trace-root]) > [data-composer-seat]'), 'the rule hides the composer while this view is mounted')
+assert.ok(seatCss.includes(':not(:has([data-approval-key],[data-question-key],[data-plan-review-key]))'), 'a pending approval, question, or plan review stays visible')
+assert.ok(seatCss.includes('~ [data-width-handle]{display:none}'), 'the width handle is hidden with the composer')
+assert.ok(source.includes('[ROOT_ATTR]: ""'), 'the view root carries the attribute the rule keys on')
 
 // The bundle carries its own SSE assembler; the page carries a parallel copy,
 // because neither face can import from the other without a build step.

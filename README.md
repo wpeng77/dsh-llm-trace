@@ -16,6 +16,8 @@ The client half registers one `conversation.view` entry, so a **LLM Trace** tab 
 
 `sessionId` is a plain prop on a `conversation.view` entry, and the component reads the viewer's own JSON endpoints on the same origin — no Remote API and no generated client assembly are involved.
 
+**The composer is hidden while the tab is open**, the way the Context tab does it. The composer seat is a sibling of the view area inside the conversation scroll container, so the shell exposes no per-view control over it; the bundle installs a `:has()` rule keyed on the view root instead. A pending approval, question, or plan review stays visible, because those are answers the agent is blocked on rather than a chat composer.
+
 ### The HTTP viewer
 
 The same data is served by the Web host, so it needs no second port:
