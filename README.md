@@ -125,6 +125,12 @@ Node's ESM module cache is keyed by **resolved realpath**, and the Cordis profil
 | Host logic (`lib/index.js`, config, routes) | `./sync.sh`, then reload the page. |
 | Anything after a `dsh web` restart | Nothing; the entry path stays valid. |
 
+### Never delete a published revision
+
+`dsh-client-modules` snapshots the client bundle when it first scans the package, and re-reads it only through the HMR watch on the path it captured — which belongs to whichever revision registered the package first, not the current one. Deleting that directory makes the watch permanently dirty and freezes the served bundle at the old snapshot, so a `lib/client.js` edit stops appearing with no error anywhere.
+
+`sync.sh` therefore keeps every revision. They are cheap (a few files plus two symlinks) and their client paths are the only handle the registry has. The row name still has to change per revision, because that is what defeats the module cache; the two requirements pull in opposite directions and this is the arrangement that satisfies both.
+
 ## Test
 
 `test/smoke.mjs` runs a real local HTTP server that streams SSE, and asserts that the consumer still receives every chunk incrementally, that request and response bodies are captured verbatim, that credential headers are redacted, that non-matching URLs are ignored, that the detail pane owns a single scroller, that the SSE assembler drops the per-chunk envelope, that session attribution survives interleaved pulls, that the authentication guard rejects an unauthenticated caller, and that disposal restores the prior `fetch`.
