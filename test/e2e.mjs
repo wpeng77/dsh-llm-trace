@@ -194,6 +194,43 @@ console.log('--- detail pane ---')
 console.log(detail)
 console.log('--- end detail ---')
 
+// Each pane must scroll itself. The shell's view area carries `min-height: auto`,
+// so an in-flow view grows to its content and pushes the shell's scroll body past
+// the viewport, which scrolls both panes together. The view root is therefore
+// absolutely positioned; this asserts the arrangement still holds.
+const layout = JSON.parse(await evaluate(`(function(){
+  var row = document.querySelector('[data-exchange]');
+  if (!row) return JSON.stringify({ error: 'no rows' });
+  var root = row;
+  while (root && getComputedStyle(root).position !== 'absolute') root = root.parentElement;
+  if (!root) return JSON.stringify({ error: 'the view root is not absolutely positioned' });
+  var scrollers = [];
+  Array.prototype.forEach.call(root.querySelectorAll('*'), function(n){
+    var cs = getComputedStyle(n);
+    if (cs.overflowY === 'auto' || cs.overflowY === 'scroll') {
+      scrollers.push({ clientH: n.clientHeight, scrollH: n.scrollHeight });
+    }
+  });
+  var shell = document.querySelector('[class*="scrollBody"]');
+  return JSON.stringify({
+    scrollers: scrollers,
+    shellOverflow: shell ? shell.scrollHeight - shell.clientHeight : 0
+  });
+})()`))
+
+const selfScrolling = layout.scrollers.filter((s) => s.scrollH > s.clientH + 4).length
+console.log('self-scrolling panes :', selfScrolling, 'of', layout.scrollers.length)
+console.log('shell overflow       :', layout.shellOverflow, 'px')
+
+if (selfScrolling < 2) {
+  console.log('LAYOUT FAIL: fewer than two panes scroll themselves — both panes will scroll together')
+  finish(1)
+}
+if (layout.shellOverflow > 4) {
+  console.log('LAYOUT FAIL: the shell scroll body overflows, so the panes scroll as one')
+  finish(1)
+}
+
 console.log('console errors  :', consoleErrors.length ? JSON.stringify(consoleErrors.slice(0, 5)) : 'none')
 console.log('exceptions      :', exceptions.length ? JSON.stringify(exceptions.slice(0, 5)) : 'none')
 finish(exceptions.length === 0 ? 0 : 1)
