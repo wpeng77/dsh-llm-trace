@@ -1,5 +1,6 @@
 # Bundle patch layer for dsh-llm-trace: the row loads this package's main entry
-# as a plain Cordis host plugin. It contributes no client half.
+# as the Cordis host plugin. The package's `dsh.client` declaration separately
+# makes the Web app load its ./client bundle as the browser half.
 - insert:
     - id: llm-trace
       name: 'dsh-llm-trace'
