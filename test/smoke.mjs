@@ -137,8 +137,26 @@ assert.ok(/#pane\{flex:1;min-height:0;overflow:auto/.test(page.body), 'the detai
 assert.ok(!/pre\{[^}]*overflow:auto/.test(page.body), 'a body panel does not nest its own scroller')
 
 // --- the SSE assembler drops the per-chunk envelope -------------------------
-const script = /<script>([\s\S]*?)<\/script>/.exec(page.body)[1]
-const assembleSse = new Function(`${/function assembleSse\(raw\)\{[\s\S]*?\n\}/.exec(script)[0]}\nreturn assembleSse`)()
+// --- the shared browser modules are served and are the single implementation --
+const script = /<script type="module">([\s\S]*?)<\/script>/.exec(page.body)[1]
+assert.ok(script.includes("await import(BASE + '/assets/sse.js')"), 'the page imports the shared SSE module')
+assert.ok(script.includes("await import(BASE + '/assets/json-tree.js')"), 'the page imports the shared tree module')
+assert.ok(!script.includes('function assembleSse'), 'the page carries no assembler of its own')
+
+const sseAsset = await callRoute(ctx.routes[0], '/llm-trace/assets/sse.js')
+assert.equal(sseAsset.status, 200, 'the shared SSE module is served')
+assert.equal(sseAsset.headers['content-type'], 'text/javascript; charset=utf-8')
+assert.ok(sseAsset.body.includes('export function assembleSse'), 'the served module exports the assembler')
+
+const treeAsset = await callRoute(ctx.routes[0], '/llm-trace/assets/json-tree.js')
+assert.equal(treeAsset.status, 200, 'the shared tree module is served')
+assert.ok(treeAsset.body.includes('export function flatten'), 'the served module exports the flattener')
+
+// A name-derived path would let a caller walk out of the asset directory.
+assert.equal((await callRoute(ctx.routes[0], '/llm-trace/assets/../index.js')).status, 404, 'the asset route is an allowlist')
+assert.equal((await callRoute(ctx.routes[0], '/llm-trace/assets/nope.js')).status, 404, 'an unknown asset is refused')
+
+const { assembleSse } = await import('../lib/browser/sse.js')
 
 /** Build one provider chunk carrying a delta, mirroring the real wire format. */
 function chunk(delta, extra = {}) {

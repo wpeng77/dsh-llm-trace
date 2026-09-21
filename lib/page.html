@@ -42,6 +42,19 @@ td:first-child{color:var(--dim);white-space:nowrap;width:1%}
 .note{color:var(--dim);font-size:12px}
 .empty{color:var(--dim);padding:24px;text-align:center}
 .pill{display:inline-block;font-size:11px;padding:1px 7px;border-radius:999px;border:1px solid var(--line);color:var(--dim);margin-right:6px}
+.tree{background:var(--panel);border:1px solid var(--line);border-radius:6px;padding:6px 0;font-size:12px}
+.trow{display:flex;gap:8px;align-items:baseline;padding:1px 10px;white-space:nowrap}
+.trow[data-toggle]{cursor:pointer}
+.trow[data-toggle]:hover{background:#1c2128}
+.tcaret{color:var(--dim);width:10px;flex:none}
+.tkey{color:var(--fg);flex:none;max-width:32ch;overflow:hidden;text-overflow:ellipsis}
+.tval{color:var(--dim);overflow:hidden;text-overflow:ellipsis;flex:1}
+.tval.k-string{color:var(--ok)}
+.tval.k-number{color:var(--warn)}
+.tval.k-boolean{color:var(--accent)}
+.tsize{color:var(--dim);flex:none;font-size:11px;opacity:.8}
+.trow.more{color:var(--accent);cursor:pointer}
+.trow.more:hover{background:#1c2128}
 </style></head><body>
 <header>
 <h1>LLM Trace</h1>
@@ -58,15 +71,25 @@ td:first-child{color:var(--dim);white-space:nowrap;width:1%}
 <div id="pane"><div class="empty">select an exchange</div></div>
 </section>
 </main>
-<script>
+<script type="module">
 var BASE = location.pathname.replace(/\/+$/,'');
+/* Both faces load these two modules, so the tree logic and the SSE assembler
+   have exactly one implementation. The mount path is configurable, so the
+   specifiers are built from it rather than written statically. */
+const { assembleSse, isSseBody } = await import(BASE + '/assets/sse.js');
+const { DEFAULT_CHILD_LIMIT, ROOT_PATH, flatten, measure } = await import(BASE + '/assets/json-tree.js');
+
 var entries = [];
 var selected = null;
 var tab = 'resbody';
 var mode = 'assembled';
+var reqMode = 'tree';
 var detail = null;
 var detailId = null;
 var detailState = null;
+/* Tree state is per exchange and reset whenever the detail changes. */
+var expanded = new Set([ROOT_PATH]);
+var limits = new Map();
 
 function esc(s){return String(s).replace(/[&<>"]/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]})}
 function num(n){return String(n).replace(/\B(?=(\d{3})+(?!\d))/g,',')}
@@ -76,39 +99,31 @@ function shortPath(u){try{var x=new URL(u);return x.host+x.pathname}catch(e){ret
 function ms(e){if(e.endedAt&&e.startedAt)return (e.endedAt-e.startedAt)+' ms';if(e.headersAt&&e.startedAt)return (e.headersAt-e.startedAt)+' ms+';return '…'}
 function pretty(text){try{return JSON.stringify(JSON.parse(text),null,2)}catch(e){return text}}
 
-/* Rebuild one readable view from a provider's SSE chunk stream. Every chunk
-   repeats the whole JSON envelope, so keeping only the deltas drops the bulk. */
-function assembleSse(raw){
-  var a={reasoning:'',content:'',tools:[],finish:null,usage:null,chunks:0,done:false,broken:0};
-  var lines=raw.split('\n');
-  for(var i=0;i<lines.length;i++){
-    var l=lines[i];
-    if(l.slice(0,6)!=='data: ')continue;
-    var p=l.slice(6).trim();
-    if(p==='[DONE]'){a.done=true;continue}
-    var c;
-    try{c=JSON.parse(p)}catch(e){a.broken++;continue}
-    a.chunks++;
-    if(c.usage)a.usage=c.usage;
-    var chs=c.choices||[];
-    for(var j=0;j<chs.length;j++){
-      var ch=chs[j],dl=ch.delta||{};
-      if(dl.reasoning_content)a.reasoning+=dl.reasoning_content;
-      if(dl.content)a.content+=dl.content;
-      var tcs=dl.tool_calls||[];
-      for(var k=0;k<tcs.length;k++){
-        var tc=tcs[k],idx=(tc.index===undefined?0:tc.index);
-        if(!a.tools[idx])a.tools[idx]={id:'',name:'',args:''};
-        if(tc.id)a.tools[idx].id=tc.id;
-        if(tc.function){
-          if(tc.function.name)a.tools[idx].name+=tc.function.name;
-          if(tc.function.arguments)a.tools[idx].args+=tc.function.arguments;
-        }
-      }
-      if(ch.finish_reason)a.finish=ch.finish_reason;
+/* Parse a body for the tree view; null when it is not JSON or was cut short. */
+function parseBody(text){
+  if(!text)return null;
+  try{return JSON.parse(text)}catch(e){return null}
+}
+
+/* Flatten the visible tree and render it. Only expanded nodes contribute rows,
+   which is what keeps a multi-megabyte request body from materializing tens of
+   thousands of elements at once. */
+function renderTree(value){
+  var sizes=measure(value);
+  var rows=flatten(value,expanded,sizes,limits);
+  return '<div class="tree">'+rows.map(function(r){
+    var pad=r.depth*14+10;
+    if(r.kind==='more'){
+      return '<div class="trow more" data-more="'+esc(r.owner)+'" style="padding-left:'+pad+'px">'
+        +esc(r.preview)+'</div>';
     }
-  }
-  return a;
+    var caret=r.expandable?(r.expanded?'▾':'▸'):'·';
+    return '<div class="trow"'+(r.expandable?' data-toggle="'+esc(r.path)+'"':'')+' style="padding-left:'+pad+'px">'
+      +'<span class="tcaret">'+caret+'</span>'
+      +'<span class="tkey">'+esc(r.label)+'</span>'
+      +'<span class="tval k-'+r.kind+'">'+esc(r.preview)+'</span>'
+      +'<span class="tsize">'+bytes(r.bytes)+'</span></div>';
+  }).join('')+'</div>';
 }
 
 function renderList(){
@@ -139,8 +154,11 @@ function headersTable(pairs){
   return '<table>'+pairs.map(function(p){return '<tr><td>'+esc(p[0])+'</td><td>'+esc(p[1])+'</td></tr>'}).join('')+'</table>';
 }
 
-function paneBar(note,rawToggle){
+function paneBar(note,rawToggle,treeToggle){
   var h='<div class="bar"><span class="note">'+note+'</span>';
+  if(treeToggle){
+    h+='<button id="reqmode">'+(reqMode==='tree'?'Show raw JSON':'Show tree')+'</button>';
+  }
   if(rawToggle){
     h+='<button id="mode">'+(mode==='assembled'?'Show raw SSE':'Show assembled')+'</button>';
   }
@@ -154,8 +172,14 @@ function renderPane(){
   var h='';
   if(tab==='reqbody'){
     var rb=detail.requestBody||'';
-    h+=paneBar(num(rb.length)+' chars'+(detail.requestTruncated?' · truncated':''),false);
-    h+='<pre>'+esc(rb?pretty(rb):'(empty)')+'</pre>';
+    var parsed=reqMode==='tree'?parseBody(rb):null;
+    h+=paneBar(num(rb.length)+' chars'+(detail.requestTruncated?' · truncated':''),false,parsed!==null);
+    if(parsed!==null){
+      h+=renderTree(parsed);
+    }else{
+      if(reqMode==='tree')h+='<div class="note">not parseable JSON — showing it raw</div>';
+      h+='<pre>'+esc(rb?pretty(rb):'(empty)')+'</pre>';
+    }
     if(detail.requestCaptureError)h+='<div class="note">capture error: '+esc(detail.requestCaptureError)+'</div>';
   }else if(tab==='resbody'){
     var raw=detail.responseBody||'';
@@ -192,8 +216,24 @@ function renderPane(){
     h+=headersTable(detail.responseHeaders);
   }
   pane.innerHTML=h;
+  var rm=document.getElementById('reqmode');
+  if(rm)rm.onclick=function(){reqMode=(reqMode==='tree'?'raw':'tree');renderPane()};
   var mb=document.getElementById('mode');
   if(mb)mb.onclick=function(){mode=(mode==='assembled'?'raw':'assembled');renderPane()};
+  Array.prototype.forEach.call(pane.querySelectorAll('[data-toggle]'),function(n){
+    n.onclick=function(){
+      var p=n.getAttribute('data-toggle');
+      if(expanded.has(p))expanded.delete(p);else expanded.add(p);
+      renderPane();
+    };
+  });
+  Array.prototype.forEach.call(pane.querySelectorAll('[data-more]'),function(n){
+    n.onclick=function(){
+      var p=n.getAttribute('data-more');
+      limits.set(p,(limits.get(p)||DEFAULT_CHILD_LIMIT)*4);
+      renderPane();
+    };
+  });
   var cb=document.getElementById('copy');
   if(cb)cb.onclick=function(){
     var t=tab==='reqbody'?pretty(detail.requestBody||''):tab==='resbody'?(detail.responseBody||''):JSON.stringify(tab==='reqheaders'?detail.requestHeaders:detail.responseHeaders,null,2);
@@ -230,7 +270,10 @@ function ensureDetail(){
   var id=selected;
   fetch(BASE+'/api/exchange?id='+encodeURIComponent(id)).then(function(r){return r.json()}).then(function(e){
     if(e.error){detail=null;document.getElementById('pane').innerHTML='<div class="empty">'+esc(e.error)+'</div>';document.getElementById('meta').textContent='';document.getElementById('tabs').innerHTML='';return}
-    detail=e;detailId=id;detailState=want;renderMeta();renderTabs();renderPane();
+    detail=e;detailId=id;detailState=want;
+    /* A different exchange means a different tree. */
+    expanded=new Set([ROOT_PATH]);limits=new Map();
+    renderMeta();renderTabs();renderPane();
   });
 }
 

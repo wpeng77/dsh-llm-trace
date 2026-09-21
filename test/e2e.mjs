@@ -129,19 +129,37 @@ await sleep(1500)
 await send('Page.navigate', { url: `${ORIGIN}/` })
 await sleep(3000)
 
+const tabRowCount = () => evaluate(`document.querySelectorAll('[data-exchange]').length`)
+
 let labels = await waitForTabs()
-if (labels.length === 0) {
-  // The blank Hero renders no views; open a session from the sidebar first.
-  const opened = await evaluate(`(function(){
-    var items = Array.from(document.querySelectorAll('[role="treeitem"]'));
-    var target = items.filter(function(n){ return /(min|\\dh|\\dd|mo)\\b/.test(n.textContent) })[0];
-    if (!target) return 'no session item found';
-    target.click();
-    return target.textContent.trim().slice(0, 60);
-  })()`)
-  console.log('opened session  :', opened)
-  labels = await waitForTabs()
+let openedSession = 'none'
+if (labels.length === 0 || (await tabRowCount()) === 0) {
+  // Captures are session-scoped, so only the session that made the calls has any
+  // rows. Walk the sidebar until one does, rather than assuming the first is it.
+  const sessionCount = await evaluate(`Array.from(document.querySelectorAll('[role="treeitem"]')).filter(function(n){ return /(min|\\dh|\\dd|mo)\\b/.test(n.textContent) }).length`)
+  for (let index = 0; index < sessionCount; index++) {
+    const clicked = await evaluate(`(function(){
+      var items = Array.from(document.querySelectorAll('[role="treeitem"]')).filter(function(n){ return /(min|\\dh|\\dd|mo)\\b/.test(n.textContent) });
+      if (!items[${index}]) return 'none';
+      items[${index}].click();
+      return items[${index}].textContent.trim().slice(0, 50);
+    })()`)
+    await sleep(2500)
+    labels = await waitForTabs()
+    if (labels.length === 0) continue
+    await evaluate(`(function(){
+      var tabs = Array.from(document.querySelectorAll('[role="tab"]'));
+      var target = tabs.filter(function(n){ return n.textContent.indexOf('LLM Trace') >= 0 })[0];
+      if (target) target.click();
+      return !!target
+    })()`)
+    await sleep(2500)
+    const rows = await tabRowCount()
+    openedSession = `${clicked} → ${rows} rows`
+    if (rows > 0) break
+  }
 }
+console.log('opened session  :', openedSession)
 
 console.log('tabs            :', JSON.stringify(labels))
 const hasTab = labels.some((label) => label.includes('LLM Trace'))
@@ -194,6 +212,61 @@ console.log('--- detail pane ---')
 console.log(detail)
 console.log('--- end detail ---')
 
+// --- the request body renders as a bounded, collapsible tree ---------------
+const requestTabClicked = await evaluate(`(function(){
+  var buttons = Array.from(document.querySelectorAll('button'));
+  var target = buttons.filter(function(n){ return /Request body|请求体/.test(n.textContent) })[0];
+  if (target) target.click();
+  return !!target
+})()`)
+if (!requestTabClicked) {
+  console.log('TREE FAIL: the request body tab is missing')
+  finish(1)
+}
+await sleep(1500)
+
+const treeShape = async () => JSON.parse(await evaluate(`(function(){
+  var rows = Array.from(document.querySelectorAll('[data-path]'));
+  var root = rows.filter(function(n){ return n.getAttribute('data-path') === '' })[0];
+  return JSON.stringify({
+    rows: rows.length,
+    hasRoot: !!root,
+    rootText: root ? root.innerText.replace(/\\s+/g, ' ').slice(0, 80) : null
+  });
+})()`))
+
+const collapsed = await treeShape()
+console.log('tree (collapsed)     :', JSON.stringify(collapsed))
+if (!collapsed.hasRoot) {
+  console.log('TREE FAIL: the request body did not render as a tree')
+  finish(1)
+}
+if (collapsed.rows > 20) {
+  console.log(`TREE FAIL: the collapsed tree materialized ${collapsed.rows} rows; it must stay small`)
+  finish(1)
+}
+
+// Expanding one node must add only that node's children, and stay under the cap.
+const expansion = await evaluate(`(function(){
+  var rows = Array.from(document.querySelectorAll('[data-path]'));
+  var target = rows.filter(function(n){ return n.getAttribute('data-path') === '/messages' })[0];
+  if (!target) return 'no /messages row';
+  target.click();
+  return 'clicked'
+})()`)
+await sleep(1800)
+const expandedShape = await treeShape()
+console.log('tree (/messages open):', JSON.stringify(expandedShape), '|', expansion)
+
+if (expandedShape.rows <= collapsed.rows) {
+  console.log('TREE FAIL: expanding /messages added no rows')
+  finish(1)
+}
+if (expandedShape.rows > 600) {
+  console.log(`TREE FAIL: one expansion materialized ${expandedShape.rows} rows; the child limit is not holding`)
+  finish(1)
+}
+
 // Each pane must scroll itself. The shell's view area carries `min-height: auto`,
 // so an in-flow view grows to its content and pushes the shell's scroll body past
 // the viewport, which scrolls both panes together. The view root is therefore
@@ -219,11 +292,19 @@ const layout = JSON.parse(await evaluate(`(function(){
 })()`))
 
 const selfScrolling = layout.scrollers.filter((s) => s.scrollH > s.clientH + 4).length
-console.log('self-scrolling panes :', selfScrolling, 'of', layout.scrollers.length)
+console.log('scrollers            :', layout.scrollers.length, '| self-scrolling:', selfScrolling)
 console.log('shell overflow       :', layout.shellOverflow, 'px')
 
-if (selfScrolling < 2) {
-  console.log('LAYOUT FAIL: fewer than two panes scroll themselves — both panes will scroll together')
+// Both panes exist as scrollers; only the captured data decides whether each one
+// actually overflows, so the number of overflowing panes is not asserted. What the
+// fix guarantees is that the shell no longer scrolls them as one column and that
+// the pane holding the body does scroll itself.
+if (layout.scrollers.length < 2) {
+  console.log('LAYOUT FAIL: the view does not expose two independently scrollable panes')
+  finish(1)
+}
+if (selfScrolling < 1) {
+  console.log('LAYOUT FAIL: no pane scrolls itself, so the shell is scrolling the content')
   finish(1)
 }
 if (layout.shellOverflow > 4) {

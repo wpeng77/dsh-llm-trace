@@ -50,6 +50,27 @@ This page is **not** session-scoped: it shows every provider call the process ma
 
 Both surfaces pass through the Web host's Host/Origin fence and browser-session cookie check.
 
+### The request body opens as a tree
+
+A real request is mostly one array. A measured capture was 3,653,601 bytes across 8,787 JSON nodes, of which `messages` alone was 3,602,024 bytes — **98.6%** — in 973 entries. Reading that as pretty-printed text means scrolling a long way to learn one fact.
+
+So the request body renders as a collapsible tree, collapsed to its top level by default:
+
+```
+▼ root   Object(6) · model: "deepseek-v4.1-flash"                     3.7 MiB
+  ├ model             "deepseek-v4.1-flash"                             21 B
+  ├ messages  ▸       Array(973)                                     3.4 MiB
+  ├ stream            true                                               4 B
+  ├ stream_options ▸  Object(1)                                         23 B
+  ├ max_tokens        384000                                             6 B
+  └ tools  ▸          Array(65)                                     62.7 KiB
+```
+
+- **Sizes are measured, not estimated.** One bottom-up pass gives every node its compact serialized size, so the root's figure equals the captured body exactly.
+- **Only expanded nodes render.** The default view is seven rows; a collapsed multi-megabyte subtree costs one. A container past 500 children emits a "more" row that raises that one container's limit instead of materializing the rest.
+- **Previews are generic.** A container shows its child count and its first short string field, chosen by position rather than by key name, so a shape this plugin has never seen still reads as something.
+- **`Tree` / `Raw`** switches back to the literal bytes, and a body that does not parse (a truncated capture) falls back to raw with a note.
+
 ### Why a response body looks enormous
 
 A provider streams **one SSE chunk per token**, and every chunk repeats the entire JSON envelope:
@@ -105,6 +126,7 @@ Set them from a profile patch:
 - **Session attribution rides `AsyncLocalStorage`.** `llm/stream` carries `options.sessionId`, and the adapter's network request happens while the returned stream is pulled. The listener runs every pull inside `sessionScope.run(sessionId, …)`, which makes the id readable from the `fetch` wrapper below the adapter. Interleaved subagent calls stay correct because each pull installs its own scope.
 - **Retention is a count- and byte-bounded ring.** Oldest-first eviction keeps memory flat across a long session.
 - **The tab's view root is absolutely positioned.** The Conversation shell's view area carries `min-height: auto`, so an in-flow view sizes to its content, pushes the shell's scroll body past the viewport, and makes the shell scroll both panes together. Taking the root out of flow breaks that intrinsic-size chain, which is what lets the list and the detail pane each own a scroller. `test/e2e.mjs` asserts it: two self-scrolling panes and no shell overflow.
+- **The two browser faces share one implementation.** The tree logic and the SSE assembler live in `lib/browser/`, which the host serves under `/llm-trace/assets/` and both the viewer document and the Conversation View bundle `import()`. The asset route is a closed allowlist rather than a path join, because a name-derived path would let a caller walk out of the directory.
 - **The viewer document and the client bundle are read per request.** Editing either takes effect without reloading the host module.
 - **The wrapper is restored synchronously on disposal**, so a live profile reload cannot leave a stale wrapper installed.
 - **The tab carries no build step.** `lib/client.js` is hand-written in the `window.__ModuleLoader__.load` envelope that `dsh-client-modules` serves: it requires only the platform `react` seed and uses `React.createElement` instead of JSX, so no bundler, no tsdown preset, and no module-graph declaration are involved.
@@ -112,7 +134,6 @@ Set them from a profile patch:
 ## Known Limitations and Deferred Work
 
 - **Secrets in bodies are not redacted.** Header redaction covers the credential headers; the request body still carries the full system prompt, every tool schema, and any file content the agent read. Both surfaces sit behind the Web host's loopback bind plus its browser-session cookie check, which is the only access control.
-- **The SSE assembler exists twice.** `lib/page.html` and `lib/client.js` each carry a copy, because a static document and a hand-written bundle cannot import from each other without a build step. A change to one must be mirrored in the other.
 - **`path` is not shared with the client.** The tab fetches a constant, so a non-default mount path needs a matching edit in `lib/client.js`.
 - **The wrapper is process-global and order-dependent.** `@deepseek-ai/dsh-experimental-inspector` wraps the same global; running both nests the wrappers and captures every exchange twice.
 - **A `fetch` reference cached before this plugin activates is not observed.** `dsh-llm-pi-ai` constructs its provider client per request, so it is covered; another adapter that caches the reference at load would not be.
@@ -123,7 +144,7 @@ Set them from a profile patch:
 ## Develop
 
 ```sh
-npm test           # host smoke test + browser-bundle unit test
+npm test           # shared tree logic + host smoke test + browser-bundle unit test
 ```
 
 `test/e2e.mjs` is the only check that covers the whole path. It needs a running `dsh web` and the launch token that host printed, drives a headless chromium over CDP, opens a session, asserts the tab is present, clicks it, opens the largest captured response, reads the assembled view back, and checks the pane and composer layout:

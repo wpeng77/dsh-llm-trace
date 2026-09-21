@@ -94,8 +94,13 @@ assert.ok(seatCss.includes(':not(:has([data-approval-key],[data-question-key],[d
 assert.ok(seatCss.includes('~ [data-width-handle]{display:none}'), 'the width handle is hidden with the composer')
 assert.ok(source.includes('[ROOT_ATTR]: ""'), 'the view root carries the attribute the rule keys on')
 
-// The bundle carries its own SSE assembler; the page carries a parallel copy,
-// because neither face can import from the other without a build step.
-assert.ok(source.includes('function assembleSse'), 'the bundle carries the SSE assembler')
+// Both browser faces import the same two modules, so neither may carry its own
+// copy of the tree logic or the SSE assembler.
+assert.ok(source.includes("import(BASE + \"/assets/json-tree.js\")"), 'the bundle loads the shared tree module')
+assert.ok(source.includes("import(BASE + \"/assets/sse.js\")"), 'the bundle loads the shared SSE module')
+assert.ok(!source.includes('function assembleSse'), 'the bundle carries no assembler of its own')
+assert.ok(!source.includes('function measure('), 'the bundle carries no tree logic of its own')
+assert.ok(source.includes('shared.sse.assembleSse(raw)'), 'the assembled view calls the shared assembler')
+assert.ok(source.includes('renderTree()'), 'the request pane renders a tree')
 
 console.log('client: all assertions passed')
