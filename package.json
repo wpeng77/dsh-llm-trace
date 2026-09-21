@@ -1,7 +1,6 @@
 {
   "name": "dsh-llm-trace",
   "version": "0.1.0",
-  "private": true,
   "description": "DeepSeek Harness plugin that captures the raw HTTP request and response bodies of model provider calls and shows them in a Conversation View tab and on a loopback viewer page.",
   "type": "module",
   "engines": {
@@ -18,8 +17,13 @@
     "lib/client.js",
     "lib/page.html",
     "cordis.patch.yml",
-    "README.md"
+    "screenshots.json",
+    "README.md",
+    "LICENSE"
   ],
+  "scripts": {
+    "test": "node test/smoke.mjs && node test/client.mjs"
+  },
   "dsh": {
     "bundle": {
       "patch": "./cordis.patch.yml"
@@ -34,11 +38,28 @@
   "keywords": [
     "deepseek-harness",
     "dsh",
+    "dsh-plugin",
     "cordis",
     "plugin",
     "llm",
     "trace",
-    "debug"
+    "wire",
+    "debug",
+    "observability"
   ],
-  "license": "Apache-2.0"
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/wpeng77/dsh-llm-trace.git"
+  },
+  "homepage": "https://github.com/wpeng77/dsh-llm-trace",
+  "bugs": {
+    "url": "https://github.com/wpeng77/dsh-llm-trace/issues"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "^4.0.2"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
 }

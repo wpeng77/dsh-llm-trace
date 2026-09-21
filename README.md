@@ -4,15 +4,29 @@ A DeepSeek Harness plugin that captures the **raw HTTP request and response bodi
 
 ## Why it exists
 
-`dsh-context` reads the durable session log, so it shows the *provider-neutral* request the loop assembled (system prompt, tool schemas, messages, tool results) and the provider-reported token actuals. It cannot show the **wire** payload: the exact JSON `POST`ed to the provider endpoint and the exact bytes that came back. That gap is what this plugin fills.
+[dsh-context](https://github.com/bowenliang123/dsh-context) reads the durable session log, so it shows the *provider-neutral* request the loop assembled (system prompt, tool schemas, messages, tool results) and the provider-reported token actuals. It cannot show the **wire** payload: the exact JSON `POST`ed to the provider endpoint and the exact bytes that came back. That gap is what this plugin fills.
 
 The `llm/stream` waterfall is the wrong seam for the payload. It hands listeners a provider-neutral `GenerateOptions` and a `StreamChunk` iterable; the wire JSON is built *below* it, inside the adapter (`@earendil-works/pi-ai` → the official `openai` SDK → `globalThis.fetch`). The wire layer is therefore only reachable by wrapping `globalThis.fetch`.
+
+## Install
+
+```sh
+dsh plugin --profile web add dsh-llm-trace
+```
+
+Or straight from GitHub:
+
+```sh
+dsh plugin --profile web add github:wpeng77/dsh-llm-trace
+```
+
+Then start the Web UI with `dsh web`. No build step: the plugin is plain ESM, ships no bundler output, and declares no install-time script.
 
 ## Use it
 
 ### The Conversation View tab
 
-The client half registers one `conversation.view` entry, so a **LLM Trace** tab appears beside Chat in every session. It is **session-scoped**: the host attributes each captured `fetch` to the model call that caused it, so another session's or another subagent's traffic never appears in this tab.
+A **LLM Trace** tab appears beside Chat in every session. It is **session-scoped**: the host attributes each captured `fetch` to the model call that caused it, so another session's or another subagent's traffic never appears in this tab.
 
 `sessionId` is a plain prop on a `conversation.view` entry, and the component reads the viewer's own JSON endpoints on the same origin — no Remote API and no generated client assembly are involved.
 
@@ -72,6 +86,17 @@ Every field is optional. The tab and the page share one config; the tab's mount 
 | `maxRetained` | 500 | Exchanges retained before the oldest is evicted. |
 | `maxJournalBytes` | 256 MiB | Total retained body bytes across all exchanges. |
 
+Set them from a profile patch:
+
+```yaml
+- insert:
+    - id: llm-trace
+      name: 'dsh-llm-trace'
+      config:
+        match: ['model.example.com']
+        maxRetained: 2000
+```
+
 ## Design
 
 - **Only matching URLs take the capture path.** Every other `fetch` call is forwarded untouched, so unrelated traffic is never observed and pays no cost.
@@ -80,7 +105,7 @@ Every field is optional. The tab and the page share one config; the tab's mount 
 - **Session attribution rides `AsyncLocalStorage`.** `llm/stream` carries `options.sessionId`, and the adapter's network request happens while the returned stream is pulled. The listener runs every pull inside `sessionScope.run(sessionId, …)`, which makes the id readable from the `fetch` wrapper below the adapter. Interleaved subagent calls stay correct because each pull installs its own scope.
 - **Retention is a count- and byte-bounded ring.** Oldest-first eviction keeps memory flat across a long session.
 - **The tab's view root is absolutely positioned.** The Conversation shell's view area carries `min-height: auto`, so an in-flow view sizes to its content, pushes the shell's scroll body past the viewport, and makes the shell scroll both panes together. Taking the root out of flow breaks that intrinsic-size chain, which is what lets the list and the detail pane each own a scroller. `test/e2e.mjs` asserts it: two self-scrolling panes and no shell overflow.
-- **The viewer document and the client bundle are read per request / per scan.** Editing either takes effect without reloading the host module; see *Develop*.
+- **The viewer document and the client bundle are read per request.** Editing either takes effect without reloading the host module.
 - **The wrapper is restored synchronously on disposal**, so a live profile reload cannot leave a stale wrapper installed.
 - **The tab carries no build step.** `lib/client.js` is hand-written in the `window.__ModuleLoader__.load` envelope that `dsh-client-modules` serves: it requires only the platform `react` seed and uses `React.createElement` instead of JSX, so no bundler, no tsdown preset, and no module-graph declaration are involved.
 
@@ -95,52 +120,13 @@ Every field is optional. The tab and the page share one config; the tab's mount 
 - **Binary bodies are byte-counted only.**
 - **The assembled view decodes OpenAI-style SSE only.** A provider using a different streaming envelope falls back to the raw view, which is always available.
 
-## Install
-
-The plugin is loaded as a profile patch row pointing at a revision directory, not as a declared bundle:
-
-```yaml
-- insert:
-    - id: llm-trace
-      name: '/data/workspace/dsh-plugins/live/r6/lib/index.js'
-```
-
-The client row is discovered from that same absolute path: `dsh-client-modules` walks up from the resolved module to the nearest `package.json`, so the package's own `dsh.client` declaration and `./client` export are found without a `node_modules` install. `/llm-trace/api/list` reports the result under `client`.
-
-Removing the entry disposes the plugin, its route, and its tab. A `dsh plugin --profile web add/update` run does not manage this row.
-
 ## Develop
 
 ```sh
-./sync.sh          # publish a revision and repoint the profile patch
-node test/smoke.mjs
-node test/client.mjs
+npm test           # host smoke test + browser-bundle unit test
 ```
 
-Node's ESM module cache is keyed by **resolved realpath**, and the Cordis profile reload does not invalidate it. Once a plugin file has been imported, editing it in place keeps serving the old module until the host process restarts — re-creating the fiber is not enough, and a symlink alias does not help because Node resolves symlinks before caching.
-
-`sync.sh` therefore copies the working tree to `../live/r<N>/` and repoints the patch row, giving the Loader a URL it has never imported. It symlinks `lib/page.html` and `lib/client.js` instead of copying them, because the host reads both from disk:
-
-| Change | What it takes |
-| --- | --- |
-| Viewer markup, CSS, or inline script (`lib/page.html`) | Edit and refresh the browser. No reload. |
-| Browser half (`lib/client.js`) | Edit and refresh the browser. No reload. |
-| Host logic (`lib/index.js`, config, routes) | `./sync.sh`, then reload the page. |
-| Anything after a `dsh web` restart | Nothing; the entry path stays valid. |
-
-### Never delete a published revision
-
-`dsh-client-modules` snapshots the client bundle when it first scans the package, and re-reads it only through the HMR watch on the path it captured — which belongs to whichever revision registered the package first, not the current one. Deleting that directory makes the watch permanently dirty and freezes the served bundle at the old snapshot, so a `lib/client.js` edit stops appearing with no error anywhere.
-
-`sync.sh` therefore keeps every revision. They are cheap (a few files plus two symlinks) and their client paths are the only handle the registry has. The row name still has to change per revision, because that is what defeats the module cache; the two requirements pull in opposite directions and this is the arrangement that satisfies both.
-
-## Test
-
-`test/smoke.mjs` runs a real local HTTP server that streams SSE, and asserts that the consumer still receives every chunk incrementally, that request and response bodies are captured verbatim, that credential headers are redacted, that non-matching URLs are ignored, that the detail pane owns a single scroller, that the SSE assembler drops the per-chunk envelope, that session attribution survives interleaved pulls, that the authentication guard rejects an unauthenticated caller, and that disposal restores the prior `fetch`.
-
-`test/client.mjs` evaluates the hand-written browser bundle against a stub module loader and a stub React seed, and asserts its envelope, its exports, its locale namespace, and the `conversation.view` registration it performs.
-
-`test/e2e.mjs` is the only check that covers the whole path. It needs a running `dsh web` and the launch token that host printed, drives the Playwright-cached chromium over CDP, opens a session, asserts the tab is present, clicks it, opens the largest captured response, and reads the assembled view back — failing on any console error or uncaught exception.
+`test/e2e.mjs` is the only check that covers the whole path. It needs a running `dsh web` and the launch token that host printed, drives a headless chromium over CDP, opens a session, asserts the tab is present, clicks it, opens the largest captured response, reads the assembled view back, and checks the pane and composer layout:
 
 ```sh
 TOKEN=$(journalctl -u dsh-web --no-pager \
@@ -149,3 +135,18 @@ node test/e2e.mjs "$TOKEN"
 ```
 
 The token is what mints the host's browser-session cookie, which every route requires; without it the viewer answers 401 and the check cannot run.
+
+### Loading a working tree into a running host
+
+`sync.sh` publishes this tree to a revision directory and repoints a profile patch row at it, so a host-code edit takes effect without restarting `dsh web`. It exists because Node's ESM module cache is keyed by resolved realpath and the Cordis profile reload does not invalidate it.
+
+Two constraints shape it, and they pull in opposite directions:
+
+1. The Loader row name has to change per revision, because that is what defeats the module cache.
+2. Superseded revisions are never deleted, because `dsh-client-modules` snapshots the client bundle at first scan and re-reads it only through the HMR watch on the captured path — a deleted directory makes that watch permanently dirty and freezes the served bundle with no error anywhere.
+
+`lib/page.html` and `lib/client.js` are symlinked rather than copied, so editing either is live on the next browser refresh and never needs `sync.sh`.
+
+## License
+
+Apache-2.0.
