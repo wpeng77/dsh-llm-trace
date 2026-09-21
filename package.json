@@ -1,6 +1,6 @@
 {
   "name": "dsh-llm-trace",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "DeepSeek Harness plugin that captures the raw HTTP request and response bodies of model provider calls, shows the request body as a collapsible size-annotated JSON tree in a Conversation View tab and on a loopback viewer page, and assembles SSE responses back into reasoning, content and tool calls.",
   "type": "module",
   "engines": {

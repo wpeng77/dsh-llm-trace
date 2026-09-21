@@ -297,6 +297,45 @@ if (textShape.longest < 200) {
   finish(1)
 }
 
+// The expanded text must be legible in whatever theme the operator runs. The
+// theme's label colour is dark in light mode, so any panel colour hardcoded here
+// would make the value invisible on a light theme — which is exactly what a fixed
+// dark background did.
+const contrast = JSON.parse(await evaluate(`(function(){
+  function parse(value){
+    var m = /rgba?\\((\\d+), ?(\\d+), ?(\\d+)(?:, ?([\\d.]+))?\\)/.exec(value);
+    return m ? { r: +m[1], g: +m[2], b: +m[3], a: m[4] === undefined ? 1 : +m[4] } : null;
+  }
+  function luminance(c){
+    function channel(v){ v /= 255; return v <= 0.03928 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4) }
+    return 0.2126 * channel(c.r) + 0.7152 * channel(c.g) + 0.0722 * channel(c.b);
+  }
+  var blocks = Array.from(document.querySelectorAll('div')).filter(function(n){ return n.style.whiteSpace === 'pre-wrap' });
+  if (!blocks.length) return JSON.stringify({ error: 'no text block' });
+  var block = blocks.reduce(function(a, b){ return (b.innerText || '').length > (a.innerText || '').length ? b : a }, blocks[0]);
+  var colour = parse(getComputedStyle(block).color);
+  var node = block, background = null;
+  while (node && !background) {
+    var bg = parse(getComputedStyle(node).backgroundColor);
+    if (bg && bg.a > 0.5) background = bg;
+    node = node.parentElement;
+  }
+  if (!colour || !background) return JSON.stringify({ error: 'unresolved colours' });
+  var light = Math.max(luminance(colour), luminance(background));
+  var dark = Math.min(luminance(colour), luminance(background));
+  return JSON.stringify({
+    colour: getComputedStyle(block).color,
+    background: 'rgb(' + background.r + ', ' + background.g + ', ' + background.b + ')',
+    ratio: Math.round((light + 0.05) / (dark + 0.05) * 100) / 100
+  });
+})()`))
+console.log('text contrast        :', JSON.stringify(contrast))
+
+if (!(contrast.ratio >= 4.5)) {
+  console.log(`CONTRAST FAIL: the expanded text reads at ${contrast.ratio}:1; WCAG AA needs 4.5`)
+  finish(1)
+}
+
 // Each pane must scroll itself. The shell's view area carries `min-height: auto`,
 // so an in-flow view grows to its content and pushes the shell's scroll body past
 // the viewport, which scrolls both panes together. The view root is therefore
