@@ -267,6 +267,36 @@ if (expandedShape.rows > 600) {
   finish(1)
 }
 
+// A long string expands into its full text: the clipped preview is a teaser, and
+// a message body or a tool description is usually what the reader came for.
+const clickPath = (path) => evaluate(`(function(){
+  var rows = Array.from(document.querySelectorAll('[data-path]'));
+  var target = rows.filter(function(n){ return n.getAttribute('data-path') === ${JSON.stringify(path)} })[0];
+  if (!target) return 'missing';
+  target.click();
+  return 'clicked'
+})()`)
+for (const path of ['/messages/0', '/messages/0/content']) {
+  const hit = await clickPath(path)
+  if (hit !== 'clicked') {
+    console.log(`TREE FAIL: ${path} was not expandable (${hit})`)
+    finish(1)
+  }
+  await sleep(1200)
+}
+
+const textShape = JSON.parse(await evaluate(`(function(){
+  var blocks = Array.from(document.querySelectorAll('div')).filter(function(n){ return n.style.whiteSpace === 'pre-wrap' });
+  var longest = blocks.reduce(function(best, n){ return n.innerText.length > best ? n.innerText.length : best }, 0);
+  return JSON.stringify({ blocks: blocks.length, longest: longest });
+})()`))
+console.log('long string expanded :', JSON.stringify(textShape))
+
+if (textShape.longest < 200) {
+  console.log(`TREE FAIL: a long string rendered only ${textShape.longest} characters; it must expand to its full text`)
+  finish(1)
+}
+
 // Each pane must scroll itself. The shell's view area carries `min-height: auto`,
 // so an in-flow view grows to its content and pushes the shell's scroll body past
 // the viewport, which scrolls both panes together. The view root is therefore

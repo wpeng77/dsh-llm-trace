@@ -9,6 +9,7 @@
 import assert from 'node:assert/strict'
 import {
   DEFAULT_CHILD_LIMIT,
+  EXPANDED_TEXT_LIMIT,
   ROOT_PATH,
   childCount,
   flatten,
@@ -131,5 +132,29 @@ assert.equal(DEFAULT_CHILD_LIMIT, 500)
 
 // --- a truncated capture is not parseable, and that is the caller's problem --
 assert.throws(() => JSON.parse(raw.slice(0, raw.length - 20)), 'a cut body does not parse')
+
+// --- long strings expand into their full text -------------------------------
+const longText = 'line one\nline two\n' + 'x'.repeat(200)
+const withText = { content: longText, short: 'ok' }
+const textSizes = measure(withText)
+const collapsedText = flatten(withText, new Set([ROOT_PATH]), textSizes)
+assert.equal(collapsedText.find((row) => row.path === '/content').expandable, true, 'a long string is expandable')
+assert.equal(collapsedText.find((row) => row.path === '/content').expanded, false)
+assert.equal(collapsedText.find((row) => row.path === '/short').expandable, false, 'a short string is not')
+assert.ok(collapsedText.find((row) => row.path === '/content').preview.endsWith('…'), 'the preview is clipped')
+assert.equal(collapsedText.filter((row) => row.kind === 'text').length, 0, 'nothing renders while collapsed')
+
+const openedText = flatten(withText, new Set([ROOT_PATH, '/content']), textSizes)
+const textRow = openedText.find((row) => row.kind === 'text')
+assert.ok(textRow, 'expanding a long string emits a text row')
+assert.equal(textRow.text, longText, 'the full value is carried, newlines intact')
+assert.equal(textRow.textTruncated, false)
+assert.equal(textRow.depth, 2, 'the text row is indented under its key')
+assert.equal(openedText.find((row) => row.path === '/content').expanded, true)
+
+const huge = { blob: 'y'.repeat(EXPANDED_TEXT_LIMIT + 500) }
+const hugeRow = flatten(huge, new Set([ROOT_PATH, '/blob']), measure(huge)).find((row) => row.kind === 'text')
+assert.equal(hugeRow.text.length, EXPANDED_TEXT_LIMIT, 'the rendered text is capped')
+assert.equal(hugeRow.textTruncated, true, 'and says so')
 
 console.log('json-tree: all assertions passed')

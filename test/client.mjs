@@ -102,5 +102,7 @@ assert.ok(!source.includes('function assembleSse'), 'the bundle carries no assem
 assert.ok(!source.includes('function measure('), 'the bundle carries no tree logic of its own')
 assert.ok(source.includes('shared.sse.assembleSse(raw)'), 'the assembled view calls the shared assembler')
 assert.ok(source.includes('renderTree()'), 'the request pane renders a tree')
+assert.ok(source.includes('row.kind === "text"'), 'a long string expands into its full text')
+assert.ok(source.includes('note.textTruncated'), 'a capped value says so')
 
 console.log('client: all assertions passed')

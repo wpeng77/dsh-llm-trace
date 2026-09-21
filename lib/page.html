@@ -55,6 +55,7 @@ td:first-child{color:var(--dim);white-space:nowrap;width:1%}
 .tsize{color:var(--dim);flex:none;font-size:11px;opacity:.8}
 .trow.more{color:var(--accent);cursor:pointer}
 .trow.more:hover{background:#1c2128}
+.ttext{white-space:pre-wrap;word-break:break-word;background:#0d1117;border-left:2px solid var(--line);margin:2px 0 6px;padding:6px 10px;color:var(--fg)}
 </style></head><body>
 <header>
 <h1>LLM Trace</h1>
@@ -116,6 +117,12 @@ function renderTree(value){
     if(r.kind==='more'){
       return '<div class="trow more" data-more="'+esc(r.owner)+'" style="padding-left:'+pad+'px">'
         +esc(r.preview)+'</div>';
+    }
+    if(r.kind==='text'){
+      /* Deliberately not a nested scroller: the pane owns the scroll, and the
+         header row above collapses this again. */
+      return '<div class="ttext" style="margin-left:'+pad+'px">'+esc(r.text)+'</div>'
+        +(r.textTruncated?'<div class="note" style="padding-left:'+pad+'px">truncated for display — use Copy for the full value</div>':'');
     }
     var caret=r.expandable?(r.expanded?'▾':'▸'):'·';
     return '<div class="trow"'+(r.expandable?' data-toggle="'+esc(r.path)+'"':'')+' style="padding-left:'+pad+'px">'
